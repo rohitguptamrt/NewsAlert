@@ -1,12 +1,12 @@
 // index.js - Bloom Energy (BE) Real-Time Impact Alert Monitor
 import axios from 'axios';
-import cheerio from 'cheerio';
+import { load } from 'cheerio';
 import { parse } from 'node-html-parser';
 import dayjs from 'dayjs';
 import fs from 'fs/promises';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import nodemailer from 'nodemailer';
+// Email notifications removed — using on-screen notifications instead
 import vader from 'vader-sentiment';
 import 'dotenv/config';
 
@@ -19,14 +19,6 @@ const STAKEHOLDERS = ['KR Sridhar', 'Aman Joshi', 'Greg Cameron', 'Ravi Prasher'
 const PRICE_THRESHOLD = 5.0; // % change
 const SHARE_THRESHOLD = 1000;
 const NEWS_KEYWORDS = ['travel', 'meeting', 'partnership', 'opportunity', 'earnings', 'conference', 'data center'];
-
-let transporter = nodemailer.createTransport({
-  service: 'gmail',
-  auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS,
-  },
-});
 
 async function loadState() {
   try {
@@ -42,17 +34,27 @@ async function saveState() {
   await fs.writeFile(STATE_FILE, JSON.stringify(state, null, 2));
 }
 
-async function sendEmail(subject, body) {
+// Show alerts on-screen (console) and optionally desktop notifications
+async function notifyAlerts(alerts) {
+  console.log('\n=== BLOOM ENERGY ALERTS ===\n');
+  for (const a of alerts) {
+    console.log('- ' + a.replace(/\n\s+/g, ' '));
+    console.log();
+  }
+
+  // Try to send desktop notifications if `node-notifier` is available
   try {
-    await transporter.sendMail({
-      from: `"BE Alert" <${process.env.EMAIL_FROM}>`,
-      to: process.env.EMAIL_TO,
-      subject: subject,
-      text: body,
-    });
-    console.log('Email sent:', subject);
-  } catch (err) {
-    console.error('Email failed:', err.message);
+    const notifierMod = await import('node-notifier');
+    const notifier = notifierMod.default || notifierMod;
+    for (const a of alerts.slice(0, 5)) {
+        try {
+        notifier.notify({ title: 'BE Alert', message: a, wait: false, appID: 'NewsAlert' });
+      } catch (_) {
+        // ignore per-alert failures
+      }
+    }
+  } catch (_) {
+    // `node-notifier` not installed — console output is the fallback
   }
 }
 
@@ -77,7 +79,7 @@ async function checkInsiderTransactions(lastCheck) {
 
       if (link.includes('-4-')) {
         const filingResp = await axios.get(link);
-        const $ = cheerio.load(filingResp.data);
+        const $ = load(filingResp.data);
 
         const ownerName = $('reportingOwner rptOwnerName').text().trim();
         const transactionText = $('nonDerivativeTransaction transactionAmounts transactionShares value').text();
@@ -134,12 +136,13 @@ async function checkEarningsFilings(lastCheck) {
 async function checkNews(lastCheck) {
   const alerts = [];
   const from = dayjs(lastCheck).format('YYYY-MM-DD');
-  const q = `("Bloom Energy" OR BE) (${NEWS_KEYWORDS.map(k => `"${k}"`).join(' OR ')})`;
+  const q = `Bloom Energy earnings OR partnership OR meeting`;
 
   const url = `https://newsapi.org/v2/everything?q=${encodeURIComponent(q)}&from=${from}&sortBy=publishedAt&apiKey=${process.env.NEWSAPI_KEY}`;
 
   try {
     const { data } = await axios.get(url);
+    
     for (const article of data.articles.slice(0, 10)) {
       const intensity = vader.SentimentIntensityAnalyzer.polarity_scores(article.title + '. ' + (article.description || ''));
       if (Math.abs(intensity.compound) > 0.3) {
@@ -149,6 +152,10 @@ async function checkNews(lastCheck) {
     }
   } catch (err) {
     console.error('News check failed:', err.message);
+    if (err.response) {
+      console.error('Response status:', err.response.status);
+      console.error('Response data:', err.response.data);
+    }
   }
   return alerts;
 }
@@ -191,9 +198,8 @@ async function runMonitor() {
   alerts.push(...await checkStockPrice());
 
   if (alerts.length > 0) {
-    const body = `Bloom Energy (BE) — Potential Stock Impact Alerts\n\n${alerts.join('\n\n')}\n\nGenerated: ${new Date().toLocaleString()}`;
-    await sendEmail('BE Stock Impact Alert', body);
-    console.log(`${alerts.length} alert(s) sent!`);
+    await notifyAlerts(alerts);
+    console.log(`${alerts.length} alert(s) shown!`);
   } else {
     console.log('No significant events detected.');
   }
